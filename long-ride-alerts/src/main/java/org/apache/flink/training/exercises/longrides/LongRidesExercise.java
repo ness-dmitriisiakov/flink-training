@@ -30,6 +30,7 @@ import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
 import org.apache.flink.streaming.api.functions.sink.PrintSinkFunction;
 import org.apache.flink.streaming.api.functions.sink.SinkFunction;
 import org.apache.flink.streaming.api.functions.source.SourceFunction;
+import org.apache.flink.streaming.api.windowing.time.Time;
 import org.apache.flink.training.exercises.common.datatypes.TaxiRide;
 import org.apache.flink.training.exercises.common.sources.TaxiRideGenerator;
 import org.apache.flink.util.Collector;
@@ -97,7 +98,7 @@ public class LongRidesExercise {
     public static class AlertFunction extends KeyedProcessFunction<Long, TaxiRide, Long> {
 
         private transient ValueState<TaxiRide> rideEvent;
-        private final long durationMs = 1000 * 60 * 60 * 2; // 2 hours
+        private final long durationMs = Time.hours(2).toMilliseconds();
 
         @Override
         public void open(Configuration config) {
@@ -117,31 +118,25 @@ public class LongRidesExercise {
                 return existing.getEventTimeMillis() - current.getEventTimeMillis();
         }
 
-        /**
-         * Schedule a callback for when the window has been completed.
-         */
-        private void scheduleCallback(TaxiRide current, Context context) {
-            long eventTime = current.getEventTimeMillis();
-            long endOfWindow = (eventTime - (eventTime % durationMs) + durationMs - 1);
-            context.timerService().registerEventTimeTimer(endOfWindow);
-        }
-
         @Override
         public void processElement(TaxiRide current, Context context, Collector<Long> out) throws Exception {
 
             TaxiRide existingEvent = rideEvent.value();
+            long eventTime = current.getEventTimeMillis();
+            long endOfWindow = (eventTime - (eventTime % durationMs) + durationMs);
 
             if (existingEvent != null) {
                 long duration = getDurationMs(existingEvent, current);
                 if (duration > durationMs)
                     out.collect(current.rideId);
 
+                context.timerService().deleteEventTimeTimer(endOfWindow);
                 rideEvent.clear();
             } else {
 
                 rideEvent.update(current);
                 if (current.isStart)
-                    scheduleCallback(current, context);
+                    context.timerService().registerEventTimeTimer(endOfWindow);
             }
         }
 
@@ -154,7 +149,7 @@ public class LongRidesExercise {
 
             if (existingEvent != null) {
                 long elapsedMs = currentWatermark - existingEvent.getEventTimeMillis();
-                if (elapsedMs > durationMs)
+                if (elapsedMs >= durationMs)
                     out.collect(rideId);
             }
 
