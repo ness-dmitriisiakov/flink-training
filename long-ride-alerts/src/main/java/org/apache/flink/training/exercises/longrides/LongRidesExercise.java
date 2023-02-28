@@ -21,6 +21,8 @@ package org.apache.flink.training.exercises.longrides;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.JobExecutionResult;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.state.*;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -30,7 +32,6 @@ import org.apache.flink.streaming.api.functions.sink.SinkFunction;
 import org.apache.flink.streaming.api.functions.source.SourceFunction;
 import org.apache.flink.training.exercises.common.datatypes.TaxiRide;
 import org.apache.flink.training.exercises.common.sources.TaxiRideGenerator;
-import org.apache.flink.training.exercises.common.utils.MissingSolutionException;
 import org.apache.flink.util.Collector;
 
 import java.time.Duration;
@@ -68,10 +69,9 @@ public class LongRidesExercise {
         DataStream<TaxiRide> rides = env.addSource(source);
 
         // the WatermarkStrategy specifies how to extract timestamps and generate watermarks
-        WatermarkStrategy<TaxiRide> watermarkStrategy =
-                WatermarkStrategy.<TaxiRide>forBoundedOutOfOrderness(Duration.ofSeconds(60))
-                        .withTimestampAssigner(
-                                (ride, streamRecordTimestamp) -> ride.getEventTimeMillis());
+        WatermarkStrategy<TaxiRide> watermarkStrategy = WatermarkStrategy
+                .<TaxiRide>forBoundedOutOfOrderness(Duration.ofSeconds(60))
+                .withTimestampAssigner((ride, streamRecordTimestamp) -> ride.getEventTimeMillis());
 
         // create the pipeline
         rides.assignTimestampsAndWatermarks(watermarkStrategy)
@@ -89,26 +89,76 @@ public class LongRidesExercise {
      * @throws Exception which occurs during job execution.
      */
     public static void main(String[] args) throws Exception {
-        LongRidesExercise job =
-                new LongRidesExercise(new TaxiRideGenerator(), new PrintSinkFunction<>());
-
+        LongRidesExercise job = new LongRidesExercise(new TaxiRideGenerator(), new PrintSinkFunction<>());
         job.execute();
     }
 
     @VisibleForTesting
     public static class AlertFunction extends KeyedProcessFunction<Long, TaxiRide, Long> {
 
+        private transient ValueState<TaxiRide> rideEvent;
+        private final long durationMs = 1000 * 60 * 60 * 2; // 2 hours
+
         @Override
-        public void open(Configuration config) throws Exception {
-            throw new MissingSolutionException();
+        public void open(Configuration config) {
+
+            ValueStateDescriptor<TaxiRide> rideEventState = new ValueStateDescriptor<>(
+                    "ridesEvent",
+                    TypeInformation.of(TaxiRide.class));
+
+            rideEvent = getRuntimeContext().getState(rideEventState);
+        }
+
+        private long getDurationMs(TaxiRide existing, TaxiRide current) {
+
+            if (existing.isStart)
+                return current.getEventTimeMillis() - existing.getEventTimeMillis();
+            else
+                return existing.getEventTimeMillis() - current.getEventTimeMillis();
+        }
+
+        /**
+         * Schedule a callback for when the window has been completed.
+         */
+        private void scheduleCallback(TaxiRide current, Context context) {
+            long eventTime = current.getEventTimeMillis();
+            long endOfWindow = (eventTime - (eventTime % durationMs) + durationMs - 1);
+            context.timerService().registerEventTimeTimer(endOfWindow);
         }
 
         @Override
-        public void processElement(TaxiRide ride, Context context, Collector<Long> out)
-                throws Exception {}
+        public void processElement(TaxiRide current, Context context, Collector<Long> out) throws Exception {
+
+            TaxiRide existingEvent = rideEvent.value();
+
+            if (existingEvent != null) {
+                long duration = getDurationMs(existingEvent, current);
+                if (duration > durationMs)
+                    out.collect(current.rideId);
+
+                rideEvent.clear();
+            } else {
+
+                rideEvent.update(current);
+                if (current.isStart)
+                    scheduleCallback(current, context);
+            }
+        }
 
         @Override
-        public void onTimer(long timestamp, OnTimerContext context, Collector<Long> out)
-                throws Exception {}
+        public void onTimer(long timestamp, OnTimerContext context, Collector<Long> out) throws Exception {
+
+            long currentWatermark = context.timerService().currentWatermark();
+            long rideId = context.getCurrentKey();
+            TaxiRide existingEvent = rideEvent.value();
+
+            if (existingEvent != null) {
+                long elapsedMs = currentWatermark - existingEvent.getEventTimeMillis();
+                if (elapsedMs > durationMs)
+                    out.collect(rideId);
+            }
+
+            rideEvent.clear();
+        }
     }
 }
