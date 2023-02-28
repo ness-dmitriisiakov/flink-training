@@ -19,6 +19,10 @@
 package org.apache.flink.training.exercises.ridesandfares;
 
 import org.apache.flink.api.common.JobExecutionResult;
+import org.apache.flink.api.common.state.MapState;
+import org.apache.flink.api.common.state.MapStateDescriptor;
+import org.apache.flink.api.common.typeinfo.BasicTypeInfo;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
@@ -31,7 +35,6 @@ import org.apache.flink.training.exercises.common.datatypes.TaxiFare;
 import org.apache.flink.training.exercises.common.datatypes.TaxiRide;
 import org.apache.flink.training.exercises.common.sources.TaxiFareGenerator;
 import org.apache.flink.training.exercises.common.sources.TaxiRideGenerator;
-import org.apache.flink.training.exercises.common.utils.MissingSolutionException;
 import org.apache.flink.util.Collector;
 
 /**
@@ -99,19 +102,50 @@ public class RidesAndFaresExercise {
     public static class EnrichmentFunction
             extends RichCoFlatMapFunction<TaxiRide, TaxiFare, RideAndFare> {
 
+        private transient MapState<Long, TaxiRide> rideShares;
+        private transient MapState<Long, TaxiFare> rideFares;
+
         @Override
-        public void open(Configuration config) throws Exception {
-            throw new MissingSolutionException();
+        public void open(Configuration config) {
+
+            MapStateDescriptor<Long, TaxiRide> rideSharesState = new MapStateDescriptor<>(
+                    "rideShares",
+                    BasicTypeInfo.LONG_TYPE_INFO,
+                    TypeInformation.of(TaxiRide.class));
+
+            MapStateDescriptor<Long, TaxiFare> rideFaresState = new MapStateDescriptor<>(
+                    "rideFares",
+                    BasicTypeInfo.LONG_TYPE_INFO,
+                    TypeInformation.of(TaxiFare.class));
+
+            rideShares = getRuntimeContext().getMapState(rideSharesState);
+            rideFares = getRuntimeContext().getMapState(rideFaresState);
         }
 
         @Override
         public void flatMap1(TaxiRide ride, Collector<RideAndFare> out) throws Exception {
-            throw new MissingSolutionException();
+
+            TaxiFare fare = rideFares.get(ride.rideId);
+
+            if (fare != null) {
+                out.collect(new RideAndFare(ride, fare));
+                rideFares.remove(fare.rideId);
+            } else {
+                rideShares.put(ride.rideId, ride);
+            }
         }
 
         @Override
         public void flatMap2(TaxiFare fare, Collector<RideAndFare> out) throws Exception {
-            throw new MissingSolutionException();
+
+            TaxiRide ride = rideShares.get(fare.rideId);
+
+            if (ride != null) {
+                out.collect(new RideAndFare(ride, fare));
+                rideShares.remove(ride.rideId);
+            } else {
+                rideFares.put(fare.rideId, fare);
+            }
         }
     }
 }
